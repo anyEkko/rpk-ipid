@@ -1,0 +1,44 @@
+
+name: Build rkp-ipid IPK
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 安装依赖
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip flex bison python3
+
+      - name: 克隆OpenWRT源码
+        run: |
+          git clone -b openwrt-22.03 https://github.com/openwrt/openwrt.git openwrt-src
+          cd openwrt-src
+
+      - name: 添加rkp-ipid包
+        run: |
+          cd openwrt-src
+          git clone https://github.com/CHN-beta/rkp-ipid.git package/rkp-ipid
+
+      - name: 配置编译选项
+        run: |
+          cd openwrt-src
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          # 配置目标架构（以x86_64为例，可根据需求修改）
+          echo "CONFIG_TARGET_x86=y" > .config
+          echo "CONFIG_TARGET_x86_64=y" >> .config
+          echo "CONFIG_PACKAGE_rkp-ipid=y" >> .config
+          make defconfig  # 生成默认配置
+
+      - name: 编译ipk
+        run: |
+          cd openwrt-src
+          make package/rkp-ipid/compile V=s -j$(nproc)
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v3
+        with:
+          name: rkp-ipid-ipk
+          path: openwrt-src/bin/packages/**/rkp-ipid_*.ipk
