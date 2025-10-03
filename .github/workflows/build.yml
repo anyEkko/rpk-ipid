@@ -1,44 +1,53 @@
-
-name: Build rkp-ipid IPK
-on: [push]
+name: Build rkp-ipid IPK  # 工作流名称，可自定义
+on: [push]  # 触发条件：代码推送时自动执行（可改为on: [workflow_dispatch]手动触发）
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04  # 云环境：Ubuntu 22.04（推荐，兼容性最佳）
     steps:
-      - name: 安装依赖
+      # 步骤1：安装OpenWRT编译依赖
+      - name: 安装编译依赖
         run: |
-          sudo apt update
-          sudo apt install -y build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip flex bison python3
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install -y build-essential libncurses5-dev libncursesw5-dev \
+          zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip flex \
+          bison python3 python3-pip perl-modules libxml-parser-perl
 
+      # 步骤2：克隆OpenWRT源码（以22.03稳定版为例，可切换分支）
       - name: 克隆OpenWRT源码
         run: |
           git clone -b openwrt-22.03 https://github.com/openwrt/openwrt.git openwrt-src
           cd openwrt-src
 
+      # 步骤3：添加rkp-ipid自定义包到OpenWRT的package目录
       - name: 添加rkp-ipid包
         run: |
           cd openwrt-src
           git clone https://github.com/CHN-beta/rkp-ipid.git package/rkp-ipid
 
-      - name: 配置编译选项
+      # 步骤4：更新feeds并配置编译选项（目标架构以x86_64为例，需按需修改）
+      - name: 配置编译参数
         run: |
           cd openwrt-src
+          # 更新并安装feeds（依赖管理）
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          # 配置目标架构（以x86_64为例，可根据需求修改）
-          echo "CONFIG_TARGET_x86=y" > .config
-          echo "CONFIG_TARGET_x86_64=y" >> .config
-          echo "CONFIG_PACKAGE_rkp-ipid=y" >> .config
-          make defconfig  # 生成默认配置
+          
+        
+          echo "CONFIG_PACKAGE_rkp-ipid=y" >> .config  # 勾选rkp-ipid包
+          make defconfig  # 生成默认配置（确保参数生效）
 
-      - name: 编译ipk
+      # 步骤5：编译rkp-ipid的ipk包（-j$(nproc)启用多线程加速）
+      - name: 编译rkp-ipid IPK
         run: |
           cd openwrt-src
-          make package/rkp-ipid/compile V=s -j$(nproc)
+          make package/rkp-ipid/compile V=s -j$(nproc)  # V=s显示详细日志，方便排错
 
-      - name: 上传产物
-        uses: actions/upload-artifact@v3
+      # 步骤6：上传编译产物（关键修改：升级为actions/upload-artifact@v4）
+      - name: 上传IPK产物
+        uses: actions/upload-artifact@v4  # 已从v3升级为v4，解决废弃错误
         with:
-          name: rkp-ipid-ipk
-          path: openwrt-src/bin/packages/**/rkp-ipid_*.ipk
+          name: rkp-ipid-ipk  # 产物压缩包名称（下载时显示）
+          path: openwrt-src/bin/packages/**/rkp-ipid_*.ipk  # IPK包路径（自动匹配所有架构的产物）
+          compression: zip  # 可选：指定压缩格式为zip（兼容旧版解压工具，v4默认gzip）
+          retention-days: 30  # 可选：产物保留30天（默认90天，超时自动删除）
