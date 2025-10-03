@@ -1,53 +1,91 @@
-name: Build rkp-ipid IPK  # 工作流名称，可自定义
-on: [push]  # 触发条件：代码推送时自动执行（可改为on: [workflow_dispatch]手动触发）
+name: 云编译 rkp-ipid.ipk
+
+# 触发方式：手动触发（可选择 OpenWRT 分支）
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_branch:
+        description: "选择 OpenWRT 源码分支（适配不同版本）"
+        required: true
+        default: "main"
+        type: choice
+        options:
+          - main
+          - openwrt-23.05
+          - openwrt-22.03
 
 jobs:
-  build:
-    runs-on: ubuntu-22.04  # 云环境：Ubuntu 22.04（推荐，兼容性最佳）
+  build-ipk:
+    runs-on: ubuntu-latest
     steps:
-      # 步骤1：安装OpenWRT编译依赖
-      - name: 安装编译依赖
+      # 步骤1：安装 OpenWRT 编译必需依赖
+      - name: 安装系统依赖包
         run: |
-          sudo apt update && sudo apt upgrade -y
-          sudo apt install -y build-essential libncurses5-dev libncursesw5-dev \
-          zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip flex \
-          bison python3 python3-pip perl-modules libxml-parser-perl
+          sudo apt update && sudo apt install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev \
+            libssl-dev python3-distutils rsync unzip zlib1g-dev \
+            file wget curl
 
-      # 步骤2：克隆OpenWRT源码（以22.03稳定版为例，可切换分支）
-      - name: 克隆OpenWRT源码
+      # 步骤2：拉取 OpenWRT 源码 + 修复 feeds 依赖（解决 pcre2/host 缺失）
+      - name: 克隆 OpenWRT 源码并同步 feeds
         run: |
-          git clone -b openwrt-22.03 https://github.com/openwrt/openwrt.git openwrt-src
+          git clone -b ${{ github.event.inputs.openwrt_branch }} https://github.com/openwrt/openwrt.git openwrt-src
           cd openwrt-src
-
-      # 步骤3：添加rkp-ipid自定义包到OpenWRT的package目录
-      - name: 添加rkp-ipid包
-        run: |
-          cd openwrt-src
-          git clone https://github.com/CHN-beta/rkp-ipid.git package/rkp-ipid
-
-      # 步骤4：更新feeds并配置编译选项（目标架构以x86_64为例，需按需修改）
-      - name: 配置编译参数
-        run: |
-          cd openwrt-src
-          # 更新并安装feeds（依赖管理）
+          # 清理旧 feeds 缓存和冲突文件，重新同步
+          rm -rf feeds/packages/lang/glib2
+          ./scripts/feeds clean
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          
-        
-          echo "CONFIG_PACKAGE_rkp-ipid=y" >> .config  # 勾选rkp-ipid包
-          make defconfig  # 生成默认配置（确保参数生效）
 
-      # 步骤5：编译rkp-ipid的ipk包（-j$(nproc)启用多线程加速）
-      - name: 编译rkp-ipid IPK
+      # 步骤3：部署 rkp-ipid 源码 + 修复权限（避免编译读不到文件）
+      - name: 部署 rkp-ipid 项目源码
+        run: |
+          # 创建自定义包目录，避免覆盖官方包
+          mkdir -p openwrt-src/package/custom/rkp-ipid
+          # 克隆项目源码到指定目录
+          git clone https://github.com/CHN-beta/rkp-ipid.git openwrt-src/package/custom/rkp-ipid
+          # 赋予目录正常权限，防止编译权限不足
+          chmod -R 755 openwrt-src/package/custom/rkp-ipid
+          # 验证源码是否部署成功
+          echo "=== 验证 rkp-ipid 源码目录 ==="
+          ls -l openwrt-src/package/custom/rkp-ipid
+
+      # 步骤4：配置编译参数（仅编译 rkp-ipid，减少耗时）
+      - name: 配置编译选项
         run: |
           cd openwrt-src
-          make package/rkp-ipid/compile V=s -j$(nproc)  # V=s显示详细日志，方便排错
+          # 加载默认配置
+          make defconfig
+          # 强制启用 rkp-ipid 编译
+          echo "CONFIG_PACKAGE_rkp-ipid=y" >> .config
+          # 禁用非必需组件（加速编译）
+          echo "CONFIG_PACKAGE_luci=n" >> .config
+          echo "CONFIG_BUILD_LOG=y" >> .config
+          # 生成最终配置（非交互模式）
+          make menuconfig -o .config
+          # 验证配置是否生效
+          echo "=== 验证 rkp-ipid 编译配置 ==="
+          cat .config | grep CONFIG_PACKAGE_rkp-ipid
 
-      # 步骤6：上传编译产物（关键修改：升级为actions/upload-artifact@v4）
-      - name: 上传IPK产物
-        uses: actions/upload-artifact@v4  # 已从v3升级为v4，解决废弃错误
+      # 步骤5：清理旧产物 + 编译 ipk（解决“Nothing to be done”问题）
+      - name: 清理旧编译产物并编译
+        run: |
+          cd openwrt-src
+          # 清理 rkp-ipid 历史编译文件，强制重新编译
+          make package/rkp-ipid/clean V=s
+          # 多线程编译（自动适配 CPU 核心数）
+          make package/rkp-ipid/compile V=s -j$(nproc)
+          # 验证编译产物是否存在
+          echo "=== 验证 ipk 产物 ==="
+          find openwrt-src/bin/packages -name "rkp-ipid_*.ipk"
+
+      # 步骤6：上传 ipk 产物（无无效参数，确保能正常上传）
+      - name: 上传 ipk 到 Artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: rkp-ipid-ipk  # 产物压缩包名称（下载时显示）
-          path: openwrt-src/bin/packages/**/rkp-ipid_*.ipk  # IPK包路径（自动匹配所有架构的产物）
-          compression: zip  # 可选：指定压缩格式为zip（兼容旧版解压工具，v4默认gzip）
-          retention-days: 30  # 可选：产物保留30天（默认90天，超时自动删除）
+          name: rkp-ipid-ipk-${{ github.event.inputs.openwrt_branch }}
+          path: openwrt-src/bin/packages/**/rkp-ipid_*.ipk
+          if-no-files-found: error  # 无文件时报错，便于排查
+          compression-level: 6      # 仅保留官方支持的参数
+          retention-days: 7         # 产物保留7天
