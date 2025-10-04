@@ -21,10 +21,8 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib \
           gettext git libncurses5-dev libssl-dev python3 python3-distutils rsync \
-          unzip zlib1g-dev file wget bc m4 ccache libelf-dev libssl-dev \
+          unzip zlib1g-dev file wget bc m4 ccache libelf-dev \
           texinfo pkg-config automake autoconf libtool
-        # 验证关键工具安装
-        which flex bison m4 gcc g++ make
 
     - name: Clone ImmortalWrt source for IPQ6000
       run: |
@@ -32,22 +30,21 @@ jobs:
         cd openwrt-build-ax1800
         git checkout v23.05.3
 
-    - name: Update feeds and install base packages
+    - name: Update feeds
       run: |
         cd openwrt-build-ax1800
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        # 安装基础工具链包
-        ./scripts/feeds install libtool
-        ./scripts/feeds install automake
-        ./scripts/feeds install autoconf
 
-    - name: Clone rkp-ipid package
+    - name: Add rkp-ipid package
       run: |
         cd openwrt-build-ax1800
-        git clone https://github.com/CHN-beta/rkp-ipid.git package/rkp-ipid
-        echo "包目录内容:"
-        ls -la package/rkp-ipid/
+        mkdir -p package/kernel/rkp-ipid
+        cp -r $GITHUB_WORKSPACE/src package/kernel/rkp-ipid/
+        cp -r $GITHUB_WORKSPACE/Makefile package/kernel/rkp-ipid/
+        if [ -d "$GITHUB_WORKSPACE/patches" ]; then
+          cp -r $GITHUB_WORKSPACE/patches package/kernel/rkp-ipid/
+        fi
 
     - name: Configure for JDCloud AX1800
       run: |
@@ -57,85 +54,43 @@ CONFIG_TARGET_qualcommax=y
 CONFIG_TARGET_qualcommax_ipq60xx=y
 CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_ax1800-pro=y
 CONFIG_PACKAGE_kmod-rkp-ipid=y
-CONFIG_TOOLCHAIN_BUILD=y
 EOF
         make defconfig
 
-    - name: Download all dependencies with retry
+    - name: Download dependencies
       run: |
         cd openwrt-build-ax1800
-        # 多次尝试下载，确保文件完整
         for i in {1..3}; do
           make download -j$(nproc) && break || sleep 10
         done
-        # 删除可能损坏的小文件
-        find dl/ -size -1024c -delete
-        # 最终下载尝试
-        make download -j$(nproc) || make download -j1
 
-    - name: Build toolchain first
+    - name: Build kernel preparation
       run: |
         cd openwrt-build-ax1800
-        echo "开始编译工具链..."
-        make toolchain/compile -j$(nproc) V=s || make toolchain/compile -j1 V=s
-        echo "工具链编译完成"
+        make target/linux/prepare V=s
 
-    - name: Build kernel headers and preparation
+    - name: Compile kmod-rkp-ipid
       run: |
         cd openwrt-build-ax1800
-        echo "开始准备内核..."
-        make target/linux/prepare -j$(nproc) V=s || make target/linux/prepare -j1 V=s
-        echo "内核准备完成"
+        make package/kernel/rkp-ipid/compile V=s -j$(nproc) || make package/kernel/rkp-ipid/compile V=s -j1
 
-    - name: Build kernel modules
-      run: |
-        cd openwrt-build-ax1800
-        echo "开始编译内核模块..."
-        make target/linux/compile -j$(nproc) V=s || make target/linux/compile -j1 V=s
-        echo "内核模块编译完成"
-
-    - name: Compile kmod-rkp-ipid package
-      run: |
-        cd openwrt-build-ax1800
-        echo "开始编译 rkp-ipid 包..."
-        make package/rkp-ipid/compile -j$(nproc) V=s || make package/rkp-ipid/compile -j1 V=s
-
-    - name: Find and collect IPK files
+    - name: Find IPK files
       run: |
         cd openwrt-build-ax1800
         mkdir -p $GITHUB_WORKSPACE/artifacts-ax1800
-        # 搜索所有可能的IPK文件位置
-        find bin -name "*rkp-ipid*.ipk" -exec cp {} $GITHUB_WORKSPACE/artifacts-ax1800/ \;
-        find build_dir -name "*rkp-ipid*.ipk" -exec cp {} $GITHUB_WORKSPACE/artifacts-ax1800/ 2>/dev/null \; || true
-        
-        if [ "$(ls -A $GITHUB_WORKSPACE/artifacts-ax1800)" ]; then
-          echo "✅ 成功找到IPK文件:"
-          ls -la $GITHUB_WORKSPACE/artifacts-ax1800/
+        IPK_FILES=$(find bin -name "*rkp-ipid*.ipk" 2>/dev/null || true)
+        if [ -n "$IPK_FILES" ]; then
+          echo "Found IPK files:"
+          echo "$IPK_FILES"
+          echo "$IPK_FILES" | xargs -I {} cp {} $GITHUB_WORKSPACE/artifacts-ax1800/
         else
-          echo "⚠️ 未找到rkp-ipid包，列出所有IPK文件:"
-          find bin -name "*.ipk" | head -10
-          echo "检查包编译状态..."
-          make package/rkp-ipid/status V=s
+          echo "Searching for any IPK files in bin directory:"
+          find bin -name "*.ipk" | head -5
         fi
 
     - name: Upload IPK artifact
-      if: always()
       uses: actions/upload-artifact@v4
       with:
         name: kmod-rkp-ipid-ax1800
         path: artifacts-ax1800/
         retention-days: 30
-
-    - name: Debug information
-      if: failure()
-      run: |
-        cd openwrt-build-ax1800
-        echo "=== 调试信息 ==="
-        echo "工具链状态:"
-        ls -la staging_dir/toolchain-*/bin/ | head -10 || echo "工具链目录不存在"
-        echo "主机工具状态:"
-        ls -la staging_dir/host/bin/ | head -10 || echo "主机工具目录不存在"
-        echo "包配置检查:"
-        grep "rkp-ipid" .config || echo "包未在配置中找到"
-        echo "编译日志:"
-        find . -name "*.log" -path "*/rkp-ipid/*" | head -5
