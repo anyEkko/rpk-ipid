@@ -94,3 +94,4 @@ EOF
         name: kmod-rkp-ipid-ax1800
         path: artifacts-ax1800/
         retention-days: 30
+        if-no-files-found: warn
